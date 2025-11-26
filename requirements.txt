@@ -9,3 +9,6 @@ seaborn
 scikit-learn
 statsmodels
 gunicorn
+dash
+dash-bootstrap-components
+joblib
