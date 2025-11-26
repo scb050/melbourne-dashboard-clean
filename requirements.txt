@@ -6,7 +6,7 @@ matplotlib==3.9.2
 folium
 streamlit-folium
 seaborn
-scikit-learn
+scikit-learn==1.6.1
 statsmodels
 gunicorn
 dash
