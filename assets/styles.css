@@ -1,0 +1,74 @@
+/* ===========================
+   ESTILO V1 — GLASSMORPHISM
+   =========================== */
+
+:root {
+    --bg: #f1f3f8;
+    --text: #1f2937;
+    --primary: #3b82f6;
+    --glass-bg: rgba(255, 255, 255, 0.55);
+    --glass-border: rgba(255, 255, 255, 0.40);
+}
+
+/* Layout */
+.layout {
+    display: flex;
+    min-height: 100vh;
+    background: var(--bg);
+}
+
+/* Sidebar estilo glass */
+.sidebar {
+    width: 260px;
+    padding: 25px 22px;
+    backdrop-filter: blur(16px);
+    background: var(--glass-bg);
+    border-right: 1px solid var(--glass-border);
+}
+
+.sidebar h2 {
+    font-size: 1.5rem;
+    margin-bottom: 25px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+/* Items del sidebar */
+.sidebar-item {
+    padding: 14px 18px;
+    margin-bottom: 10px;
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.35);
+    transition: 0.25s;
+    border: 1px solid transparent;
+    backdrop-filter: blur(4px);
+}
+
+.sidebar-item:hover {
+    border-color: var(--primary);
+}
+
+/* Activo */
+.sidebar-item.active {
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+
+/* Contenido */
+.main-content {
+    flex: 1;
+    padding: 40px;
+}
+
+/* Cards */
+.card {
+    background: white;
+    border-radius: 16px;
+    border: 1px solid #e5e7eb;
+    padding: 32px;
+}
