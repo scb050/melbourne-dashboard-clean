@@ -4,16 +4,19 @@
 # Navegación: Sidebar vertical colapsable (full width)
 # ================================================================
 
+import functools
+from pathlib import Path
+import json
+
 import dash
 from dash import html, dcc
 from dash.dependencies import Input, Output
 import dash_bootstrap_components as dbc
+
 import pandas as pd
 import joblib
-import json
 import plotly.express as px
 import plotly.graph_objects as go
-from pathlib import Path
 
 # Folium
 import folium
@@ -21,38 +24,65 @@ from folium.plugins import MarkerCluster
 
 
 # ================================================================
-# 1) CARGA DE DATOS / MODELO
+# 1) RUTAS DE DATOS / MODELO (SIN CARGARLOS AÚN)
 # ================================================================
 DATA_PATH = Path("data/melb_data.csv")
-df_raw = pd.read_csv(DATA_PATH)
-df = df_raw.copy()  # si luego quieres usar df imputado, reemplaza aquí
-
 MODEL_PATH = Path("models/melb_model.pkl")
-model = joblib.load(MODEL_PATH)
-
 METRICS_PATH = Path("models/melb_metrics.json")
-with open(METRICS_PATH, "r", encoding="utf-8") as f:
-    model_metrics = json.load(f)
-
 PRED_PATH = Path("models/melb_test_predictions.csv")
-df_pred = pd.read_csv(PRED_PATH)
+ASSETS_MAP_PATH = Path("assets/melbourne_map.html")
 
-# Normalizar nombres de columnas de predicciones para robustez
-rename_map = {}
-if "real_price" in df_pred.columns and "Price_real" not in df_pred.columns:
-    rename_map["real_price"] = "Price_real"
-if "prediction" in df_pred.columns and "Price_pred" not in df_pred.columns:
-    rename_map["prediction"] = "Price_pred"
-if "pred_price" in df_pred.columns and "Price_pred" not in df_pred.columns:
-    rename_map["pred_price"] = "Price_pred"
-if "error" in df_pred.columns and "Error" not in df_pred.columns:
-    rename_map["error"] = "Error"
-if rename_map:
-    df_pred = df_pred.rename(columns=rename_map)
 
-# ----------------------------
-# PRECOMPUTAR: feature_importances + guardar mapa EN ARRANQUE
-# ----------------------------
+# ================================================================
+# 1.1) FUNCIONES DE CARGA PEREZOSA (LAZY LOADING)
+# ================================================================
+
+@functools.lru_cache(maxsize=1)
+def load_dataframes():
+    """Carga melb_data.csv una sola vez y devuelve (df_raw, df_copia)."""
+    df_raw = pd.read_csv(DATA_PATH)
+    df = df_raw.copy()
+    return df_raw, df
+
+
+@functools.lru_cache(maxsize=1)
+def load_model():
+    """Carga el modelo entrenado una sola vez."""
+    return joblib.load(MODEL_PATH)
+
+
+@functools.lru_cache(maxsize=1)
+def load_metrics():
+    """Carga el JSON de métricas una sola vez."""
+    with open(METRICS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@functools.lru_cache(maxsize=1)
+def load_pred_df():
+    """Carga las predicciones y normaliza nombres de columnas una sola vez."""
+    df_pred = pd.read_csv(PRED_PATH)
+
+    rename_map = {}
+    if "real_price" in df_pred.columns and "Price_real" not in df_pred.columns:
+        rename_map["real_price"] = "Price_real"
+    if "prediction" in df_pred.columns and "Price_pred" not in df_pred.columns:
+        rename_map["prediction"] = "Price_pred"
+    if "pred_price" in df_pred.columns and "Price_pred" not in df_pred.columns:
+        rename_map["pred_price"] = "Price_pred"
+    if "error" in df_pred.columns and "Error" not in df_pred.columns:
+        rename_map["error"] = "Error"
+
+    if rename_map:
+        df_pred = df_pred.rename(columns=rename_map)
+
+    return df_pred
+
+
+# ================================================================
+# 1.2) FEATURE IMPORTANCES Y MAPA — TAMBIÉN LAZY
+# ================================================================
+
 def _safe_extract_importances(model, df_sample):
     try:
         estimator = model
@@ -70,10 +100,8 @@ def _safe_extract_importances(model, df_sample):
         elif hasattr(estimator, "feature_names_in_"):
             names = list(estimator.feature_names_in_)
         else:
-            # fallback: variables numéricas/columnas del df de entrenamiento aproximadas
             names = df_sample.select_dtypes(include="number").columns.tolist()
         if len(names) != len(importances):
-            # Si las longitudes no coinciden, intentar recortar o extender con placeholders
             min_len = min(len(names), len(importances))
             names = names[:min_len]
             importances = importances[:min_len]
@@ -96,16 +124,27 @@ def _safe_extract_importances(model, df_sample):
     except Exception:
         return None
 
-# Precomputar figura de importancias usando una muestra razonable del df
-_sample_df = df.sample(min(1000, len(df))) if len(df) > 0 else df
-fig_imp_global = _safe_extract_importances(model, _sample_df) or go.Figure().update_layout(
-    title="No fue posible obtener Feature Importance"
-)
 
-# Crear/guardar mapa UNA VEZ al iniciar (evita que Dash reinicie por cambio en assets)
-assets_map_path = Path("assets/melbourne_map.html")
-if not assets_map_path.exists():
+@functools.lru_cache(maxsize=1)
+def get_feature_importance_figure():
+    """Calcula la figura de importancias una sola vez."""
+    _, df = load_dataframes()
+    model = load_model()
+    sample_df = df.sample(min(1000, len(df))) if len(df) > 0 else df
+    fig = _safe_extract_importances(model, sample_df)
+    if fig is None:
+        fig = go.Figure().update_layout(
+            title="No fue posible obtener Feature Importance"
+        )
+    return fig
+
+
+def ensure_map_created():
+    """Crea/guarda el mapa de Folium solo si no existe y solo cuando se necesita."""
+    if ASSETS_MAP_PATH.exists():
+        return
     try:
+        _, df = load_dataframes()
         m = folium.Map(location=[-37.8136, 144.9631], zoom_start=11, tiles="CartoDB positron")
         mc = MarkerCluster().add_to(m)
         lat_col = "Lattitude" if "Lattitude" in df.columns else None
@@ -118,10 +157,11 @@ if not assets_map_path.exists():
                     radius=4, fill=True, fill_opacity=0.7,
                     popup=f"Price: {row['Price']:,.0f}"
                 ).add_to(mc)
-        m.save(assets_map_path)
+        m.save(ASSETS_MAP_PATH)
     except Exception:
         # no fallar el inicio de la app si algo pasa con folium
         pass
+
 
 # ================================================================
 # 2) APP INIT
@@ -298,11 +338,13 @@ def content_intro():
         ])
     ])
 
+
 def content_contexto():
     return html.Div(className="card", children=[
         html.H2("2. Contexto"),
         dcc.Markdown(contexto_md)
     ])
+
 
 def content_problema():
     return html.Div(className="card", children=[
@@ -310,11 +352,13 @@ def content_problema():
         dcc.Markdown(problema_md)
     ])
 
+
 def content_objetivos():
     return html.Div(className="card", children=[
         html.H2("4. Objetivos y Justificación"),
         dcc.Markdown(objetivos_md)
     ])
+
 
 def content_marco_teorico():
     return html.Div(className="card", children=[
@@ -332,6 +376,7 @@ Luego se diseñó una estrategia de imputación consistente con la naturaleza de
 modelos de regresión y se seleccionó el de mejor desempeño, incorporando análisis espacial mediante mapas interactivos.
 """
 
+
 def metodo_definicion():
     return html.Div(className="card", children=[
         html.H2("a) Definición del problema"),
@@ -344,7 +389,9 @@ Se espera que la relación entre predictores y precio presente componentes no li
         """),
     ])
 
+
 def metodo_preparacion():
+    df_raw, _ = load_dataframes()
     missing = df_raw.isnull().sum().reset_index()
     missing.columns = ["Variable", "Valores faltantes"]
     return html.Div(className="card", children=[
@@ -359,6 +406,7 @@ La preparación incluyó:
         dbc.Table.from_dataframe(missing, striped=True, bordered=True, hover=True),
     ])
 
+
 def metodo_imputacion():
     return html.Div(className="card", children=[
         html.H2("c) Imputación y transformaciones"),
@@ -370,6 +418,7 @@ Para lidiar con valores faltantes:
 Tras imputar, se re-verificó la consistencia estadística para evitar sesgos fuertes en distribuciones.
         """),
     ])
+
 
 def metodo_modelo():
     return html.Div(className="card", children=[
@@ -383,7 +432,11 @@ El **Random Forest Regressor** fue seleccionado por:
         """),
     ])
 
+
 def metodo_evaluacion():
+    model_metrics = load_metrics()
+    df_pred = load_pred_df()
+
     best_name = model_metrics.get("mejor_modelo", "random_forest")
     best_res = model_metrics.get("resultados", {}).get(best_name, {})
     mae = best_res.get("MAE", None)
@@ -413,6 +466,8 @@ El desempeño se evaluó utilizando el conjunto de prueba.
 # 6) RESULTADOS D1 — EDA (LARGO + MÁS GRÁFICAS)
 # ================================================================
 def resultados_eda():
+
+    df_raw, df = load_dataframes()
 
     eda_desc_md = """
 ### Análisis Exploratorio de Datos (EDA)
@@ -501,16 +556,19 @@ y suburbios periféricos con menor costo relativo. El mapa interactivo refuerza 
 territorial de los precios.
     """
 
+    model_metrics = load_metrics()
+    df_pred = load_pred_df()
+
     best_name = model_metrics.get("mejor_modelo", "random_forest")
     best_res = model_metrics.get("resultados", {}).get(best_name, {})
     mae = best_res.get("MAE", None)
     r2 = best_res.get("R2", None)
     rmse = float((df_pred["Error"] ** 2).mean() ** 0.5) if "Error" in df_pred.columns else None
 
-    # Reutilizar la figura de importancias precomputada al inicio
-    fig_imp = fig_imp_global
+    # Figura de importancias (lazy)
+    fig_imp = get_feature_importance_figure()
 
-    # Limitar muestra para comparativa real vs predicho (evita sobrecargar el front)
+    # Limitar muestra para comparativa real vs predicho
     fig_comp = None
     if "Price_real" in df_pred.columns and "Price_pred" in df_pred.columns:
         df_comp_sample = df_pred.sample(min(1000, len(df_pred)))
@@ -537,15 +595,15 @@ territorial de los precios.
             template="simple_white"
         )
 
-    # NO recrear ni volver a guardar el mapa aquí.
-    assets_map_path = Path("assets/melbourne_map.html")
-    if assets_map_path.exists():
+    # Generar mapa solo si es necesario
+    ensure_map_created()
+    if ASSETS_MAP_PATH.exists():
         map_frame = html.Iframe(
             src="/assets/melbourne_map.html",
             style={"width": "100%", "height": "600px", "border": "none", "border-radius": "18px"}
         )
     else:
-        map_frame = html.Div("Mapa no disponible. Se generó al inicio o revisa assets/melbourne_map.html")
+        map_frame = html.Div("Mapa no disponible. Revisa assets/melbourne_map.html")
 
     return html.Div(children=[
         html.Div(className="card", children=[
@@ -603,6 +661,7 @@ y facilitando su uso en futuras ampliaciones, análisis predictivos
 y despliegues productivos.
 """
 
+
 def content_almacenamiento():
     return html.Div(className="card", children=[
         html.H2("Almacenamiento en la Nube – PostgreSQL"),
@@ -626,6 +685,7 @@ del dataset no se deteriorara, y el mapa espacial reforzó la lectura territoria
 En síntesis, este proyecto evidencia la utilidad de la analítica de datos y machine learning
 para estudios inmobiliarios, aportando herramientas interpretables para la toma de decisiones.
 """
+
 
 def content_conclusiones():
     return html.Div(className="card", children=[
@@ -663,11 +723,16 @@ def render_content(*args):
     active = clicked[-1] if clicked else 0
     tab = sections[active][0]
 
-    if tab == "intro": return content_intro()
-    if tab == "contexto": return content_contexto()
-    if tab == "problema": return content_problema()
-    if tab == "objetivos": return content_objetivos()
-    if tab == "marco": return content_marco_teorico()
+    if tab == "intro":
+        return content_intro()
+    if tab == "contexto":
+        return content_contexto()
+    if tab == "problema":
+        return content_problema()
+    if tab == "objetivos":
+        return content_objetivos()
+    if tab == "marco":
+        return content_marco_teorico()
 
     if tab == "metodo":
         return html.Div(children=[
@@ -687,11 +752,12 @@ def render_content(*args):
             resultados_eda(),
             resultados_modelo()
         ])
-    
-    if tab == "Almacenamiento": return content_almacenamiento()
 
+    if tab == "Almacenamiento":
+        return content_almacenamiento()
 
-    if tab == "conclusiones": return content_conclusiones()
+    if tab == "conclusiones":
+        return content_conclusiones()
 
     return html.Div(className="card", children=[html.H2("Selecciona una sección del menú.")])
 
@@ -701,5 +767,6 @@ def render_content(*args):
 # ================================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
+
 
 
